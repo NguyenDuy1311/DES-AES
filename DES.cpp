@@ -98,3 +98,123 @@ constexpr uint8_t S_BOX[8][4][16] = {
     }
 };
 
+void print_hex(uint64_t val, int width) {
+    std::cout << std::uppercase << std::hex << std::setw(width) << std::setfill('0') << val << std::dec;
+}
+
+} // namespace
+
+uint64_t DES::permute(uint64_t src, const uint8_t* table, int in_bits, int out_bits) {
+    uint64_t out = 0;
+    for (int i = 0; i < out_bits; ++i) {
+        uint64_t bit = (src >> (in_bits - table[i])) & 1ULL;
+        out = (out << 1) | bit;
+    }
+    return out;
+}
+
+uint32_t DES::rotl28(uint32_t val, int shift) {
+    val &= 0x0FFFFFFFU;
+    return ((val << shift) | (val >> (28 - shift))) & 0x0FFFFFFFU;
+}
+
+DES::DES(uint64_t key, bool verbose) {
+    uint64_t key56 = permute(key, PC1_TBL, 64, 56);
+    uint32_t C = static_cast<uint32_t>((key56 >> 28) & 0x0FFFFFFFULL);
+    uint32_t D = static_cast<uint32_t>(key56 & 0x0FFFFFFFULL);
+
+    if (verbose) {
+        std::cout << "=== DES KEY SCHEDULE ===\n";
+        std::cout << "Key (64-bit) : "; print_hex(key, 16); std::cout << "\n";
+        std::cout << "After PC-1   : C0="; print_hex(C, 7);
+        std::cout << " | D0="; print_hex(D, 7); std::cout << "\n";
+    }
+
+    for (int r = 0; r < 16; ++r) {
+        C = rotl28(C, SHIFT_SCHED[r]);
+        D = rotl28(D, SHIFT_SCHED[r]);
+        uint64_t cd = (static_cast<uint64_t>(C) << 28) | D;
+        subkeys_[r] = permute(cd, PC2_TBL, 56, 48);
+
+        if (verbose) {
+            std::cout << "Round " << std::setw(2) << std::setfill(' ') << (r + 1)
+                      << " : C="; print_hex(C, 7);
+            std::cout << " | D="; print_hex(D, 7);
+            std::cout << " | K=" ; print_hex(subkeys_[r], 12);
+            std::cout << "\n";
+        }
+    }
+}
+
+uint32_t DES::feistel(uint32_t right, uint64_t subkey, int round, bool verbose) {
+    uint64_t expanded = permute(right, E_TBL, 32, 48);
+    uint64_t xored = expanded ^ subkey;
+
+    uint32_t s_out = 0;
+    for (int box = 0; box < 8; ++box) {
+        uint8_t chunk = static_cast<uint8_t>((xored >> (42 - 6 * box)) & 0x3F);
+        int row = ((chunk & 0x20) >> 4) | (chunk & 0x01);
+        int col = (chunk >> 1) & 0x0F;
+        s_out = (s_out << 4) | S_BOX[box][row][col];
+    }
+
+    uint32_t p_out = static_cast<uint32_t>(permute(s_out, P_TBL, 32, 32));
+
+    if (verbose) {
+        std::cout << "  [Round " << std::setw(2) << std::setfill(' ') << round << "] "
+                  << "E(R)="; print_hex(expanded, 12);
+        std::cout << " | E^K="; print_hex(xored, 12);
+        std::cout << " | SBox="; print_hex(s_out, 8);
+        std::cout << " | f="; print_hex(p_out, 8);
+        std::cout << "\n";
+    }
+
+    return p_out;
+}
+
+uint64_t DES::run_rounds(uint64_t block, bool is_decrypt, bool verbose) const {
+    uint64_t ip = permute(block, IP_TBL, 64, 64);
+    uint32_t L = static_cast<uint32_t>(ip >> 32);
+    uint32_t R = static_cast<uint32_t>(ip & 0xFFFFFFFFULL);
+
+    if (verbose) {
+        std::cout << "\n=== DES " << (is_decrypt ? "DECRYPTION" : "ENCRYPTION") << " ===\n";
+        std::cout << "Input    : "; print_hex(block, 16); std::cout << "\n";
+        std::cout << "After IP : L0="; print_hex(L, 8);
+        std::cout << " | R0="; print_hex(R, 8); std::cout << "\n";
+    }
+
+    for (int r = 0; r < 16; ++r) {
+        uint64_t rk = subkeys_[is_decrypt ? (15 - r) : r];
+        uint32_t f_val = feistel(R, rk, r + 1, verbose);
+        uint32_t next_L = R;
+        uint32_t next_R = L ^ f_val;
+        L = next_L;
+        R = next_R;
+
+        if (verbose) {
+            std::cout << "  [Round " << std::setw(2) << std::setfill(' ') << (r + 1) << "] "
+                      << "L="; print_hex(L, 8);
+            std::cout << " | R="; print_hex(R, 8);
+            std::cout << "\n";
+        }
+    }
+
+    uint64_t pre_out = (static_cast<uint64_t>(R) << 32) | L;
+    uint64_t final_out = permute(pre_out, FP_TBL, 64, 64);
+
+    if (verbose) {
+        std::cout << "Pre-output (R16||L16) : "; print_hex(pre_out, 16); std::cout << "\n";
+        std::cout << "After IP^-1 (Output)  : "; print_hex(final_out, 16); std::cout << "\n";
+    }
+
+    return final_out;
+}
+
+uint64_t DES::encrypt(uint64_t plaintext, bool verbose) const {
+    return run_rounds(plaintext, false, verbose);
+}
+
+uint64_t DES::decrypt(uint64_t ciphertext, bool verbose) const {
+    return run_rounds(ciphertext, true, verbose);
+}
